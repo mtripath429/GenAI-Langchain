@@ -3,6 +3,4 @@ langgraph>=0.2.39
 langchain>=0.2.14
 langchain-openai>=0.1.22
 langchain-community>=0.2.12
-duckduckgo-search>=6.2.10
-wikipedia>=1.4.0
-openai>=0.27.8
+tavily>=0.0.7
