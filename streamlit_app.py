@@ -36,7 +36,7 @@ if "graph_ready" not in st.session_state:
     st.session_state.graph_ready = False
 
 if "messages" not in st.session_state:
-    st.session_state.messages: List[BaseMessage] = []
+    st.session_state.messages = []
 
 if "cfg" not in st.session_state:
     st.session_state.cfg = None
