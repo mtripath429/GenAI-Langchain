@@ -14,7 +14,7 @@ from langchain_openai import ChatOpenAI
 from langchain_community.tools.wikipedia.tool import WikipediaQueryRun
 from langchain_community.utilities.wikipedia import WikipediaAPIWrapper
 from langchain_community.tools.ddg_search.tool import DuckDuckGoSearchRun  # optional
-from langchain_experimental.tools.python.tool import PythonREPLTool
+from langchain_community.tools.python.tool import PythonREPLTool
 
 
 # ---------- Streamlit page config ----------
@@ -65,7 +65,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.graph_ready = False
         st.session_state.cfg = None
-        st.experimental_rerun()
+        st.rerun()
 
 
 # ---------- LangGraph plumbing ----------
