@@ -1,97 +1,130 @@
 import os
 import streamlit as st
-from langchain_core.messages import HumanMessage, AIMessage
+from typing import TypedDict, List, Literal, Dict, Any
+
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
-from typing import Annotated, Sequence, TypedDict, Union
-from langchain_core.messages import BaseMessage
+
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_core.tools import tool
 
-# Configure page
-st.set_page_config(page_title="Search-Enabled AI Assistant", page_icon="🔍")
+# ---------------- Config ----------------
+st.set_page_config(page_title="Search-Enabled AI Assistant")
+st.title("Search-Enabled AI Assistant")
 
-# Initialize session state
+# Ensure API keys are present
+# Set these in your environment or .streamlit/secrets.toml
+if "OPENAI_API_KEY" in st.secrets:
+    os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+if "TAVILY_API_KEY" in st.secrets:
+    os.environ["TAVILY_API_KEY"] = st.secrets["TAVILY_API_KEY"]
+
+if not os.getenv("OPENAI_API_KEY"):
+    st.info("Set OPENAI_API_KEY in env or Streamlit secrets.")
+    st.stop()
+if not os.getenv("TAVILY_API_KEY"):
+    st.warning("TAVILY_API_KEY not set. Tavily search calls will fail.")
+
+# ---------------- Session ----------------
 if "messages" not in st.session_state:
-    st.session_state.messages = []
+    st.session_state.messages = []  # type: List[BaseMessage]
 
-# Define state schema
+# ---------------- State ----------------
 class State(TypedDict):
-    messages: Sequence[BaseMessage]
-    next: str
+    messages: List[BaseMessage]
 
-# Set up tools
+# ---------------- Tools ----------------
 search_tool = TavilySearchResults(max_results=3)
 
 @tool
 def search(query: str) -> str:
-    """Search the internet for information."""
+    """Search the internet for information (Tavily)."""
+    # TavilySearchResults.invoke accepts a string or dict depending on version.
+    # Here we pass the query string directly.
     results = search_tool.invoke(query)
-    return "\n".join(f"- {result['title']}: {result['content']}" for result in results)
+    lines = []
+    for r in results:
+        title = r.get("title", "")
+        content = r.get("content", "")
+        url = r.get("url", "")
+        if url:
+            lines.append(f"- {title}: {content}\n  {url}")
+        else:
+            lines.append(f"- {title}: {content}")
+    return "\n".join(lines) if lines else "No results."
 
-# Configure model
-model = ChatOpenAI(temperature=0.7)
+# ---------------- Model ----------------
+model = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
 
-# Define nodes
-def should_search(state: State) -> Union[str, Sequence[str]]:
-    """Determine if we should search based on the last message."""
-    last_message = state["messages"][-1].content
-    
-    response = model.invoke(
+# ---------------- Nodes ----------------
+def router_node(state: State) -> State:
+    """No-op node used as graph entrypoint; returns state unchanged."""
+    return {"messages": state["messages"]}
+
+def should_search(state: State) -> Literal["search", "respond"]:
+    """Decide whether to search based on the last human message."""
+    last_message = state["messages"][-1].content if state["messages"] else ""
+    decision = model.invoke(
         [
-            HumanMessage(content=f"""Based on this question: '{last_message}'
-            Should I search for information to answer it? Reply with 'search' or 'no_search'.""")
+            HumanMessage(
+                content=(
+                    "You are a routing assistant. "
+                    "Given the user question below, decide if external search is needed. "
+                    "Return exactly one word: 'search' or 'respond'.\n\n"
+                    f"Question: {last_message}"
+                )
+            )
         ]
     )
-    
-    return "search" if "search" in response.content.lower() else "respond"
+    text = (decision.content or "").strip().lower()
+    return "search" if "search" in text else "respond"
 
 def search_step(state: State) -> State:
-    """Perform search and add results to messages."""
-    last_message = state["messages"][-1].content
-    search_results = search.invoke(last_message)
-    
-    new_message = AIMessage(content=f"I found these search results:\n{search_results}")
-    return {"messages": [*state["messages"], new_message], "next": "respond"}
+    """Run search and append a summarized AI message with the findings."""
+    last_message = state["messages"][-1].content if state["messages"] else ""
+    findings = search.invoke(last_message)  # call our @tool
+    new_msg = AIMessage(content=f"I searched and found:\n\n{findings}")
+    return {"messages": [*state["messages"], new_msg]}
 
 def response_step(state: State) -> State:
-    """Generate final response."""
-    response = model.invoke(state["messages"])
-    return {"messages": [*state["messages"], response], "next": END}
+    """Generate the final response using the conversation so far."""
+    reply = model.invoke(state["messages"])
+    return {"messages": [*state["messages"], reply]}
 
-# Create workflow
+# ---------------- Graph ----------------
 workflow = StateGraph(State)
 
-# Add nodes
-workflow.add_node("should_search", should_search)
+workflow.add_node("router", router_node)      # entry node
 workflow.add_node("search", search_step)
 workflow.add_node("respond", response_step)
 
-# Add edges
-workflow.add_edge("should_search", "search")
-workflow.add_edge("should_search", "respond")
+# Route based on LLM decision
+workflow.add_conditional_edges(
+    "router",
+    should_search,
+    {"search": "search", "respond": "respond"},
+)
+
+# If we searched, then respond
 workflow.add_edge("search", "respond")
 
-# Compile workflow
+# Set entry point and compile
+workflow.set_entry_point("router")
 chain = workflow.compile()
 
-# Streamlit interface
-st.title("🔍 Search-Enabled AI Assistant")
-st.write("Ask me anything! I can search the internet for up-to-date information.")
+# ---------------- UI ----------------
+st.write("Ask me anything. I can search the web when needed.")
 
-# Get user input
-user_input = st.text_input("Your question:", key="user_input")
+user_input = st.text_input("Your question:")
 
 if user_input:
-    # Run the chain
-    result = chain.invoke({
-        "messages": [HumanMessage(content=user_input)],
-        "next": "should_search"
-    })
-    
-    # Display all messages
+    # Run the graph with the new user message
+    result = chain.invoke({"messages": [HumanMessage(content=user_input)]})
+
+    # Render all messages from this run
     for msg in result["messages"]:
         if isinstance(msg, HumanMessage):
-            st.write("You:", msg.content)
+            st.markdown(f"**You:** {msg.content}")
         elif isinstance(msg, AIMessage):
-            st.write("Assistant:", msg.content)
+            st.markdown(f"**Assistant:** {msg.content}")
